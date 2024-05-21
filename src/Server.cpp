@@ -56,20 +56,22 @@ void cat_file(int argc, char **argv) {
   if (flag == "-p") {
     if (argc == 4) {
       std::string blob_sha = argv[3];
-      blob_sha.insert(2,"/");
-      blob_sha.insert(0,".git/objects/");
-      FILE * source = fopen(&blob_sha[0], "r");
+      blob_sha.insert(2, "/");
+      blob_sha.insert(0, ".git/objects/");
+      FILE *source = fopen(&blob_sha[0], "r");
       inf(source);
     } else {
       std::cout << "cli cat-file -p <blob_sha>" << std::endl;
     }
   } else {
-	  //TODO print out the content compressed content of the blob file
+    // TODO print out the content compressed content of the blob file
     std::cout << "content: " << argv[2] << std::endl;
   }
 }
 
-int inf(FILE * source) {
+int inf(FILE *source) {
+  bool header_found = false;
+  size_t header_offset = 0;
   int ret;
   unsigned have;
   z_stream strm;
@@ -110,9 +112,29 @@ int inf(FILE * source) {
         return ret;
       }
       have = CHUNK - strm.avail_out;
-      if (fwrite(out, 1, have, stdout) != have || ferror(stdout)) {
-        (void)inflateEnd(&strm);
-        return Z_ERRNO;
+      if (!header_found) {
+        for (size_t i = 0; i < have; ++i) {
+          if (out[i] == '\0') {
+            header_found = true;
+            header_offset = i + 1;
+            break;
+          }
+        }
+        if (header_found) {
+          if (header_offset < have) {
+            if (fwrite(out + header_offset, 1, have - header_offset, stdout) !=
+                    have - header_offset ||
+                ferror(stdout)) {
+              (void)inflateEnd(&strm);
+              return Z_ERRNO;
+            }
+          }
+        }
+      } else {
+        if (fwrite(out, 1, have, stdout) != have || ferror(stdout)) {
+          (void)inflateEnd(&strm);
+          return Z_ERRNO;
+        }
       }
     } while (strm.avail_out == 0);
 
