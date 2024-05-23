@@ -3,11 +3,15 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <openssl/evp.h>
+#include <sstream>
 #include <string>
 #define CHUNK 16384
 
 void cat_file(int, char **);
 int inf(FILE *);
+int hash_object(char *);
+std::string digestToString(unsigned char *digest, unsigned int len);
 
 int main(int argc, char *argv[]) {
   if (argc < 2) {
@@ -39,6 +43,11 @@ int main(int argc, char *argv[]) {
     }
   } else if (command == "cat-file") {
     cat_file(argc, argv);
+  } else if (command == "hash-object") {
+    if (argc == 3)
+      hash_object(argv[2]);
+    else
+      std::cout << "git hash-object <file name>" << std::endl;
   } else {
     std::cerr << "Unknown command " << command << '\n';
     return EXIT_FAILURE;
@@ -60,6 +69,7 @@ void cat_file(int argc, char **argv) {
       blob_sha.insert(0, ".git/objects/");
       FILE *source = fopen(&blob_sha[0], "r");
       inf(source);
+      fclose(source);
     } else {
       std::cout << "cli cat-file -p <blob_sha>" << std::endl;
     }
@@ -145,4 +155,85 @@ int inf(FILE *source) {
   (void)inflateEnd(&strm);
 
   return 0;
+}
+
+int hash_object(char *file_name) {
+  EVP_MD *md = EVP_MD_fetch(NULL, "SHA1", NULL);
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  unsigned int len = 0;
+  unsigned char *outdigest = NULL;
+  int ret = 1;
+  char *buffer[CHUNK];
+  size_t bytes;
+
+  if (!EVP_DigestInit(ctx, md))
+    return -1;
+
+  FILE *fp = fopen(file_name, "rb");
+  if (fp == NULL)
+    return -1;
+  while ((bytes = fread(buffer, 1, sizeof(buffer), fp)) != 0) {
+    if (EVP_DigestUpdate(ctx, buffer, bytes) != 1) {
+      fprintf(stderr, "Error updating digest\n");
+      fclose(fp);
+      EVP_MD_CTX_free(ctx);
+      EVP_MD_free(md);
+      return -1;
+    }
+  }
+
+  outdigest = (unsigned char *)OPENSSL_malloc(EVP_MD_get_size(md));
+  if (!EVP_DigestFinal_ex(ctx, outdigest, &len)) {
+    fprintf(stderr, "Error allocating outdigest");
+    fclose(fp);
+    EVP_MD_free(md);
+    EVP_MD_CTX_free(ctx);
+    return -1;
+  }
+  printf("len: %d outdigest: ", len);
+  for (unsigned int i = 0; i < len; i++) {
+    printf("%02x", outdigest[i]);
+  }
+
+  std::string hash = digestToString(outdigest, len);
+  std::string dir = ".git/objects/";
+  std::string hash_dir = dir + hash.substr(0, 2);
+  std::string hash_file = hash_dir + "/" + hash.substr(2);
+
+  if (!std::filesystem::exists(hash_dir)) {
+    if (!std::filesystem::create_directories(hash_dir)) {
+      fprintf(stderr, "Error creating directory %s\n", hash_dir.c_str());
+      fclose(fp);
+      EVP_MD_CTX_free(ctx);
+      EVP_MD_free(md);
+      return -1;
+    }
+  }
+
+  std::ofstream new_file(hash_file, std::ios::binary);
+  if (!new_file.is_open()) {
+    fprintf(stderr, "Error creating file %s\n", hash_file.c_str());
+    fclose(fp);
+    EVP_MD_CTX_free(ctx);
+    EVP_MD_free(md);
+    return -1;
+  }
+
+  new_file << "blob " << len << "\0";
+  new_file.write(reinterpret_cast<const char *>(outdigest), len);
+
+  // clean up
+  fclose(fp);
+  EVP_MD_free(md);
+  EVP_MD_CTX_free(ctx);
+  return 0;
+}
+
+std::string digestToString(unsigned char *digest, unsigned int len) {
+  std::stringstream ss;
+  ss << std::hex << std::setfill('0');
+  for (unsigned int i = 0; i < len; i++) {
+    ss << std::setw(2) << static_cast<unsigned int>(digest[i]);
+  }
+  return ss.str();
 }
