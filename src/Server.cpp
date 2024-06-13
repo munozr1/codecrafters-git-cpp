@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <openssl/evp.h>
+#include "sha1.h"
 #include <sstream>
 #include <string>
 #define CHUNK 16384
@@ -44,10 +44,10 @@ int main(int argc, char *argv[]) {
   } else if (command == "cat-file") {
     cat_file(argc, argv);
   } else if (command == "hash-object") {
-    if (argc == 3)
-      hash_object(argv[2]);
+    if (argc == 4)
+      hash_object(argv[3]);
     else
-      std::cout << "git hash-object <file name>" << std::endl;
+      std::cout << "git hash-object -w <file name>" << std::endl;
   } else {
     std::cerr << "Unknown command " << command << '\n';
     return EXIT_FAILURE;
@@ -158,75 +158,121 @@ int inf(FILE *source) {
 }
 
 int hash_object(char *file_name) {
-  EVP_MD *md = EVP_MD_fetch(NULL, "SHA1", NULL);
-  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-  unsigned int len = 0;
-  unsigned char *outdigest = NULL;
-  int ret = 1;
-  char *buffer[CHUNK];
-  size_t bytes;
+    SHA1_CTX ctx;
+    unsigned char outdigest[SHA1_BLOCK_SIZE];
+    int ret;
+    BYTE buffer[CHUNK];
+    size_t bytes;
+    int flush = Z_NO_FLUSH;
 
-  if (!EVP_DigestInit(ctx, md))
-    return -1;
-
-  FILE *fp = fopen(file_name, "rb");
-  if (fp == NULL)
-    return -1;
-  while ((bytes = fread(buffer, 1, sizeof(buffer), fp)) != 0) {
-    if (EVP_DigestUpdate(ctx, buffer, bytes) != 1) {
-      fprintf(stderr, "Error updating digest\n");
-      fclose(fp);
-      EVP_MD_CTX_free(ctx);
-      EVP_MD_free(md);
-      return -1;
+    // Open the file
+    FILE *fp = fopen(file_name, "rb");
+    if (fp == NULL) {
+        perror("fopen");
+        return -1;
     }
-  }
 
-  outdigest = (unsigned char *)OPENSSL_malloc(EVP_MD_get_size(md));
-  if (!EVP_DigestFinal_ex(ctx, outdigest, &len)) {
-    fprintf(stderr, "Error allocating outdigest");
-    fclose(fp);
-    EVP_MD_free(md);
-    EVP_MD_CTX_free(ctx);
-    return -1;
-  }
-  printf("len: %d outdigest: ", len);
-  for (unsigned int i = 0; i < len; i++) {
-    printf("%02x", outdigest[i]);
-  }
+    // Get the file size
+    fseek(fp, 0, SEEK_END);
+    size_t file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
 
-  std::string hash = digestToString(outdigest, len);
-  std::string dir = ".git/objects/";
-  std::string hash_dir = dir + hash.substr(0, 2);
-  std::string hash_file = hash_dir + "/" + hash.substr(2);
+    // Prepare the header
+    std::string header = "blob " + std::to_string(file_size) + '\0';
 
-  if (!std::filesystem::exists(hash_dir)) {
-    if (!std::filesystem::create_directories(hash_dir)) {
-      fprintf(stderr, "Error creating directory %s\n", hash_dir.c_str());
-      fclose(fp);
-      EVP_MD_CTX_free(ctx);
-      EVP_MD_free(md);
-      return -1;
+    // Initialize SHA-1 context and update with header
+    sha1_init(&ctx);
+    sha1_update(&ctx, reinterpret_cast<const BYTE *>(header.c_str()), header.size());
+
+    // Read the file and update SHA-1 context
+    while ((bytes = fread(buffer, 1, CHUNK, fp)) != 0) {
+        sha1_update(&ctx, buffer, bytes);
     }
-  }
 
-  std::ofstream new_file(hash_file, std::ios::binary);
-  if (!new_file.is_open()) {
-    fprintf(stderr, "Error creating file %s\n", hash_file.c_str());
+    // Finalize SHA-1 and convert to string
+    sha1_final(&ctx, outdigest);
+    std::string hash = digestToString(outdigest, SHA1_BLOCK_SIZE);
+
+    // Print the hash
+    std::cout << hash << std::endl;
+
+    // Create the necessary directory structure
+    std::string dir = ".git/objects/";
+    std::string hash_dir = dir + hash.substr(0, 2);
+    std::string hash_file = hash_dir + "/" + hash.substr(2);
+
+    if (!std::filesystem::exists(hash_dir)) {
+        if (!std::filesystem::create_directories(hash_dir)) {
+            fprintf(stderr, "Error creating directory %s\n", hash_dir.c_str());
+            fclose(fp);
+            return -1;
+        }
+    }
+
+    // Open the new file for writing the compressed content
+    std::ofstream new_file(hash_file, std::ios::binary);
+    if (!new_file.is_open()) {
+        fprintf(stderr, "Error creating file %s\n", hash_file.c_str());
+        fclose(fp);
+        return -1;
+    }
+
+    // Initialize zlib deflate
+    z_stream strm;
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+    ret = deflateInit(&strm, Z_DEFAULT_COMPRESSION);
+    if (ret != Z_OK) {
+        fclose(fp);
+        new_file.close();
+        return ret;
+    }
+
+    // Compress the header first
+    strm.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(header.c_str()));
+    strm.avail_in = header.size();
+    unsigned char out[CHUNK];
+
+    do {
+        strm.avail_out = CHUNK;
+        strm.next_out = out;
+        ret = deflate(&strm, Z_NO_FLUSH);
+        assert(ret != Z_STREAM_ERROR);
+        unsigned have = CHUNK - strm.avail_out;
+        new_file.write(reinterpret_cast<const char *>(out), have);
+    } while (strm.avail_out == 0);
+
+    // Compress the file content
+    rewind(fp);
+    do {
+        strm.avail_in = fread(buffer, 1, CHUNK, fp);
+        if (ferror(fp)) {
+            deflateEnd(&strm);
+            fclose(fp);
+            new_file.close();
+            return Z_ERRNO;
+        }
+        flush = feof(fp) ? Z_FINISH : Z_NO_FLUSH;
+        strm.next_in = buffer;
+
+        do {
+            strm.avail_out = CHUNK;
+            strm.next_out = out;
+            ret = deflate(&strm, flush);
+            assert(ret != Z_STREAM_ERROR);
+            unsigned have = CHUNK - strm.avail_out;
+            new_file.write(reinterpret_cast<const char *>(out), have);
+        } while (strm.avail_out == 0);
+
+    } while (flush != Z_FINISH);
+    assert(ret == Z_STREAM_END);
+
+    // Clean up
+    deflateEnd(&strm);
     fclose(fp);
-    EVP_MD_CTX_free(ctx);
-    EVP_MD_free(md);
-    return -1;
-  }
-
-  new_file << "blob " << len << "\0";
-  new_file.write(reinterpret_cast<const char *>(outdigest), len);
-
-  // clean up
-  fclose(fp);
-  EVP_MD_free(md);
-  EVP_MD_CTX_free(ctx);
-  return 0;
+    new_file.close();
+    return 0;
 }
 
 std::string digestToString(unsigned char *digest, unsigned int len) {
