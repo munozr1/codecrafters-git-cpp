@@ -1,13 +1,27 @@
 #include "zlib.h"
 #include <assert.h>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <ios>
+#include <iostream>
 #include "sha1.h"
+#include <iterator>
 #include <sstream>
 #include <string>
+#include <vector>
 #define CHUNK 16384
 
+
+enum STATE {
+    START,
+    TYPE,
+    ID,
+    SHA,
+};
+
+void ls_tree(const char *);
 void cat_file(int, char **);
 int inf(FILE *);
 int hash_object(char *);
@@ -41,20 +55,121 @@ int main(int argc, char *argv[]) {
       std::cerr << e.what() << '\n';
       return EXIT_FAILURE;
     }
-  } else if (command == "cat-file") {
-    cat_file(argc, argv);
+
+  }else if (command == "cat-file") {
+        cat_file(argc, argv);
+  } else if (command == "ls-tree") {
+        ls_tree(argv[2]);
   } else if (command == "hash-object") {
-    if (argc == 4)
-      hash_object(argv[3]);
-    else
-      std::cout << "git hash-object -w <file name>" << std::endl;
+        if (argc == 4) hash_object(argv[3]);
+        else std::cout << "git hash-object -w <file name>" << std::endl;
   } else {
-    std::cerr << "Unknown command " << command << '\n';
-    return EXIT_FAILURE;
+        std::cerr << "Unknown command " << command << '\n';
+        return EXIT_FAILURE;
   }
 
   return EXIT_SUCCESS;
 }
+
+
+//f6538056ca86f5142b4d0c889f1d7d02ed0bc911
+void ls_tree(const char *tree_sha) {
+    BYTE hash[20];
+    std::string tree_file = tree_sha;
+    tree_file.insert(2, "/");
+    tree_file.insert(0, ".git/objects/");
+
+    FILE *index = fopen(tree_file.c_str(), "rb");
+    if (index == NULL) {
+        std::cerr << "Error opening git index file: " << tree_file << std::endl;
+        return;
+    }
+    //inf until reach first null byte
+    int ret;
+    unsigned have;
+    z_stream strm;
+    unsigned char in[CHUNK];
+    unsigned char out[CHUNK];
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+    strm.avail_in = 0;
+    strm.next_in = Z_NULL;
+    STATE curr = START;
+    ret = inflateInit(&strm);
+    if (ret != Z_OK){
+        std::cerr << "Error initializing decomopression: "<< ret <<std::endl;
+        return;
+    }
+    do{
+        strm.avail_in = fread(in, 1, CHUNK, index);// add the uncompressed data here
+        if(ferror(index)) {
+            (void)inflateEnd(&strm);
+            std::cerr << "Err reading file: " << Z_ERRNO << std::endl;
+            fclose(index);
+        }
+        if(strm.avail_in == 0) break;
+        strm.next_in = in;
+
+        do{
+            strm.avail_out = CHUNK;
+            strm.next_out = out; // where decompressed data will be stored between calls
+            ret = inflate(&strm, Z_NO_FLUSH);
+            switch (ret) {
+                case Z_NEED_DICT:
+                    ret = Z_DATA_ERROR;
+                case Z_DATA_ERROR:
+                case Z_MEM_ERROR:
+                    (void)inflateEnd(&strm); // stop if err
+                    fclose(index);
+                    std::cerr << "Error decompressing: " << ret << std::endl;
+            }
+            have = CHUNK - strm.avail_out; // how much data we decompressed this iteration
+            //TODO: parse the input
+            int pos = 0;
+            while (pos < have){
+                switch(curr){
+                    case START:
+                        if(out[pos] == '\0') curr = TYPE;
+                        pos++;
+                        break;
+                    case TYPE:
+                        //TODO: parse type
+                        for(int i = 0; i <= 4; i++){
+                            std::cout << out[pos];
+                            pos++;
+                        }
+                        std::cout<<" "; // print space
+                        pos++;
+                        curr = ID;
+                        break;
+                    case ID:
+                        //TODO: parse file name
+                        if(out[pos] == '\0') {curr = SHA; std::cout<<" ";}// print space
+                        std::cout<< out[pos];
+                        pos++;
+                        break;
+                    case SHA:
+                        //TODO: parse 20 byte sha1 hash
+                        for(int i = 0; i < 20; i++) {
+                            printf("%02x", out[pos] & 0xff); // Convert each byte to its hexadecimal representation
+                            pos++;
+                        }
+                        std::cout<<std::endl;
+                        curr = TYPE;
+                        break;
+
+                }
+            }
+        }while(strm.avail_out == 0);
+
+    } while (ret != Z_STREAM_END);
+
+    // Clean up
+    (void)inflateEnd(&strm); // stop if err
+    fclose(index);
+}
+
 
 void cat_file(int argc, char **argv) {
   if (argc < 3) {
@@ -171,32 +286,20 @@ int hash_object(char *file_name) {
         perror("fopen");
         return -1;
     }
-
-    // Get the file size
     fseek(fp, 0, SEEK_END);
     size_t file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-
-    // Prepare the header
     std::string header = "blob " + std::to_string(file_size) + '\0';
-
-    // Initialize SHA-1 context and update with header
     sha1_init(&ctx);
     sha1_update(&ctx, reinterpret_cast<const BYTE *>(header.c_str()), header.size());
 
-    // Read the file and update SHA-1 context
     while ((bytes = fread(buffer, 1, CHUNK, fp)) != 0) {
         sha1_update(&ctx, buffer, bytes);
     }
-
-    // Finalize SHA-1 and convert to string
     sha1_final(&ctx, outdigest);
     std::string hash = digestToString(outdigest, SHA1_BLOCK_SIZE);
-
-    // Print the hash
     std::cout << hash << std::endl;
 
-    // Create the necessary directory structure
     std::string dir = ".git/objects/";
     std::string hash_dir = dir + hash.substr(0, 2);
     std::string hash_file = hash_dir + "/" + hash.substr(2);
@@ -209,7 +312,6 @@ int hash_object(char *file_name) {
         }
     }
 
-    // Open the new file for writing the compressed content
     std::ofstream new_file(hash_file, std::ios::binary);
     if (!new_file.is_open()) {
         fprintf(stderr, "Error creating file %s\n", hash_file.c_str());
@@ -217,7 +319,6 @@ int hash_object(char *file_name) {
         return -1;
     }
 
-    // Initialize zlib deflate
     z_stream strm;
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
@@ -229,11 +330,9 @@ int hash_object(char *file_name) {
         return ret;
     }
 
-    // Compress the header first
     strm.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(header.c_str()));
     strm.avail_in = header.size();
     unsigned char out[CHUNK];
-
     do {
         strm.avail_out = CHUNK;
         strm.next_out = out;
@@ -268,7 +367,6 @@ int hash_object(char *file_name) {
     } while (flush != Z_FINISH);
     assert(ret == Z_STREAM_END);
 
-    // Clean up
     deflateEnd(&strm);
     fclose(fp);
     new_file.close();
