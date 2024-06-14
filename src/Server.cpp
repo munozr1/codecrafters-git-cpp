@@ -21,7 +21,7 @@ enum STATE {
     SHA,
 };
 
-void ls_tree(const char *);
+void ls_tree(int, char**);
 void cat_file(int, char **);
 int inf(FILE *);
 int hash_object(char *);
@@ -59,7 +59,7 @@ int main(int argc, char *argv[]) {
   }else if (command == "cat-file") {
         cat_file(argc, argv);
   } else if (command == "ls-tree") {
-        ls_tree(argv[2]);
+        ls_tree(argc, argv);
   } else if (command == "hash-object") {
         if (argc == 4) hash_object(argv[3]);
         else std::cout << "git hash-object -w <file name>" << std::endl;
@@ -73,9 +73,24 @@ int main(int argc, char *argv[]) {
 
 
 //f6538056ca86f5142b4d0c889f1d7d02ed0bc911
-void ls_tree(const char *tree_sha) {
+void ls_tree(int argc, char **argv) {
     BYTE hash[20];
-    std::string tree_file = tree_sha;
+    std::string tree_file;
+    int nameonly = 0;
+
+    switch(argc){
+        case 3:
+            tree_file = argv[2];
+            break;
+        case 4:
+            tree_file = argv[3];
+            nameonly = 1;
+            break;
+        default:
+            std::cout<< "git ls-tree <flags> <tree-hash>"<<std::endl;
+            return;
+    }
+
     tree_file.insert(2, "/");
     tree_file.insert(0, ".git/objects/");
 
@@ -136,23 +151,27 @@ void ls_tree(const char *tree_sha) {
                     case TYPE:
                         //TODO: parse type
                         for(int i = 0; i <= 4; i++){
-                            std::cout << out[pos];
+                            if(!nameonly) std::cout << out[pos];
                             pos++;
                         }
-                        std::cout<<" "; // print space
                         pos++;
                         curr = ID;
                         break;
                     case ID:
                         //TODO: parse file name
-                        if(out[pos] == '\0') {curr = SHA; std::cout<<" ";}// print space
-                        std::cout<< out[pos];
-                        pos++;
+                        if (out[pos] == '\0') {
+                            curr = SHA;
+                            if (!nameonly) std::cout << " ";
+                            pos++;
+                        } else {
+                            if(out[pos] != ' ') std::cout<<out[pos];
+                            pos++;
+                        }
                         break;
                     case SHA:
                         //TODO: parse 20 byte sha1 hash
                         for(int i = 0; i < 20; i++) {
-                            printf("%02x", out[pos] & 0xff); // Convert each byte to its hexadecimal representation
+                            if(!nameonly) printf("%02x", out[pos] & 0xff); // Convert each byte to its hexadecimal representation
                             pos++;
                         }
                         std::cout<<std::endl;
