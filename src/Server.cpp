@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <cstdio>
 #include <filesystem>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <ios>
@@ -21,6 +22,8 @@ enum STATE {
     SHA,
 };
 
+// void write_tree(std::string, int );
+void write_tree(const std::string);
 void ls_tree(int, char**);
 void cat_file(int, char **);
 int inf(FILE *);
@@ -63,7 +66,10 @@ int main(int argc, char *argv[]) {
   } else if (command == "hash-object") {
         if (argc == 4) hash_object(argv[3]);
         else std::cout << "git hash-object -w <file name>" << std::endl;
-  } else {
+  }else if (command == "write-tree") {
+        if (argc == 2) write_tree(".");
+        else std::cout << "git write-tree" << std::endl;
+  }else {
         std::cerr << "Unknown command " << command << '\n';
         return EXIT_FAILURE;
   }
@@ -399,4 +405,40 @@ std::string digestToString(unsigned char *digest, unsigned int len) {
     ss << std::setw(2) << static_cast<unsigned int>(digest[i]);
   }
   return ss.str();
+}
+
+// void write_tree(std::string dirpath, int depth){
+void write_tree(const std::string path){
+    int len = 0;
+    std::string header;
+    std::string content;
+    try {
+        for (const auto &entry : std::filesystem::directory_iterator(path)) {
+            if (entry.path().filename() == ".git") {
+                continue;
+            }
+            if(entry.is_directory()) continue;
+            if(entry.is_symlink()) continue;
+            std::cout<< "0000 " <<entry.path().filename().c_str()<< " <sha>" <<std::endl;
+            //TODO: reurse dir directories
+        }
+        //TODO: if depth = 0 add the header, else don't
+        // header = "tree " + std::to_string(len) + '\0';
+    } catch (const std::filesystem::filesystem_error &e) {
+        std::cerr << "Filesystem error: " << e.what() << std::endl;
+    } catch (const std::exception &e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
+}
+
+/*
+* std::string file_path: path to the file
+* returns std::string  ->   <mode> <name>\0<20_byte_sha>
+*/
+std::string tree_entry_file(std::filesystem::directory_entry entry){
+    std::string blob = "100644 " +entry.path().filename() + " ";
+    //TODO: calculate sha
+
+    return blob;
 }
